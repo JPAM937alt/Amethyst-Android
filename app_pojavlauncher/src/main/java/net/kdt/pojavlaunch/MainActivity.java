@@ -63,6 +63,7 @@ import net.kdt.pojavlaunch.prefs.QuickSettingSideDialog;
 import net.kdt.pojavlaunch.services.GameService;
 import net.kdt.pojavlaunch.utils.JREUtils;
 import net.kdt.pojavlaunch.utils.MCOptionUtils;
+import net.kdt.pojavlaunch.utils.TouchControllerInputView;
 import net.kdt.pojavlaunch.utils.TouchControllerUtils;
 import net.kdt.pojavlaunch.value.MinecraftAccount;
 import net.kdt.pojavlaunch.value.launcherprofiles.LauncherProfiles;
@@ -85,6 +86,7 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
     protected static View.OnGenericMotionListener motionListener = (v, event) -> false;
 
     public static TouchCharInput touchCharInput;
+    private TouchControllerInputView touchControllerInputView;
     private MinecraftGLSurface minecraftGLView;
     private static Touchpad touchpad;
     private LoggerView loggerView;
@@ -142,9 +144,6 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
 
         String gameDirPath = Tools.getGameDirPath(minecraftProfile).getAbsolutePath();
         MCOptionUtils.load(gameDirPath);
-        if (Tools.hasTouchController(new File(gameDirPath)) || LauncherPreferences.PREF_FORCE_ENABLE_TOUCHCONTROLLER) {
-            TouchControllerUtils.initialize(this);
-        }
 
         Intent gameServiceIntent = new Intent(this, GameService.class);
         // Start the service a bit early
@@ -152,6 +151,10 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
         initLayout(R.layout.activity_basemain);
         CallbackBridge.addGrabListener(touchpad);
         CallbackBridge.addGrabListener(minecraftGLView);
+
+        if (Tools.hasTouchController(new File(gameDirPath)) || LauncherPreferences.PREF_FORCE_ENABLE_TOUCHCONTROLLER) {
+            TouchControllerUtils.initialize(this, touchControllerInputView);
+        }
 
         mGyroControl = new GyroControl(this);
 
@@ -205,6 +208,8 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
             // FIXME: is it safe for multi thread?
             GLOBAL_CLIPBOARD = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
             touchCharInput.setCharacterSender(new LwjglCharSender());
+
+            touchControllerInputView.setSize(minecraftGLView.getWidth(), minecraftGLView.getHeight());
 
             if(minecraftProfile.pojavRendererName != null) {
                 Log.i("RdrDebug","__P_renderer="+minecraftProfile.pojavRendererName);
@@ -306,6 +311,7 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
         loggerView = findViewById(R.id.mainLoggerView);
         mControlLayout = findViewById(R.id.main_control_layout);
         touchCharInput = findViewById(R.id.mainTouchCharInput);
+        touchControllerInputView = findViewById(R.id.touch_controller_input);
         mDrawerPullButton = findViewById(R.id.drawer_button);
         mHotbarView = findViewById(R.id.hotbar_view);
     }
@@ -314,6 +320,7 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
     public void onResume() {
         super.onResume();
         if(PREF_ENABLE_GYRO) mGyroControl.enable();
+        CallbackBridge.nativeSetWindowAttrib(LwjglGlfwKeycode.GLFW_FOCUSED, 1);
         CallbackBridge.nativeSetWindowAttrib(LwjglGlfwKeycode.GLFW_HOVERED, 1);
     }
 
@@ -326,6 +333,7 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
         if(mQuickSettingSideDialog != null) {
             mQuickSettingSideDialog.cancel();
         }
+        CallbackBridge.nativeSetWindowAttrib(LwjglGlfwKeycode.GLFW_FOCUSED, 0);
         CallbackBridge.nativeSetWindowAttrib(LwjglGlfwKeycode.GLFW_HOVERED, 0);
 
         super.onPause();
@@ -361,9 +369,11 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
         mControlLayout.requestLayout();
         mControlLayout.post(()->{
             // Child of mControlLayout, so refreshing size here is correct
+            Tools.setFullscreen(this, setFullscreen());
             minecraftGLView.refreshSize();
             Tools.updateWindowSize(this);
             mControlLayout.refreshControlButtonPositions();
+            touchControllerInputView.setSize(minecraftGLView.getWidth(), minecraftGLView.getHeight());
         });
     }
 
@@ -416,7 +426,8 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
        } catch (RuntimeException ignored){
             assetVersion = "legacy";
        } // If this fails.. oh well.
-        
+
+        // FIXME: Automatic detection should be based on provided hint GLFW_CONTEXT_VERSION_MAJOR and GLFW_CONTEXT_VERSION_MINOR
         // Autoselect renderer
         if (Tools.LOCAL_RENDERER == null) {
             // Preferably we could detect when it is modded and swap to zink however that would also
@@ -424,11 +435,13 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
             // experience for no reason. We will compromise with just having users do it themselves.
             Tools.LOCAL_RENDERER = "opengles2";
             // MobileGlues becomes available post 1.17. It has superior compatibility with mods
-            // while having fairly similar performance performance compared to GL4ES-based forks.
+            // while having fairly similar performance compared to GL4ES-based forks.
             if(assetVersion.matches("\\d+") || // Should match all digits, which is the modern assetVersioning
                "1.17".equals(assetVersion) ||
                "1.18".equals(assetVersion) ||
-               "1.19".equals(assetVersion)) Tools.LOCAL_RENDERER = "opengles_mobileglues";
+               "1.19".equals(assetVersion) ||
+                // Angelica gives us GL3.3core on 1.7.10, it's a unique case.
+                hasMods("angelica")) Tools.LOCAL_RENDERER = "opengles_mobileglues";
         }
         if(!Tools.checkRendererCompatible(this, Tools.LOCAL_RENDERER)) {
             Tools.RenderersList renderersList = Tools.getCompatibleRenderers(this);
@@ -452,7 +465,7 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
         if (hasMods("sodium"))
             Logger.appendToLog("WARNING: Sodium is being used, Amethyst-Android does NOT support this mod, you are on your own");
         Logger.appendToLog("--------- Starting game with Launcher Debug!");
-        Tools.printLauncherInfo(versionId, Tools.isValidString(minecraftProfile.javaArgs) ? minecraftProfile.javaArgs : LauncherPreferences.PREF_CUSTOM_JAVA_ARGS);
+        Tools.printLauncherInfo(versionId, Tools.isValidString(minecraftProfile.javaArgs) ? minecraftProfile.javaArgs : LauncherPreferences.PREF_CUSTOM_JAVA_ARGS, Tools.getTotalDeviceMemory(this));
         if(Tools.LOCAL_RENDERER.equals("opengles_mobileglues")) {
             LauncherPreferences.writeMGRendererSettings();
         }
@@ -676,6 +689,7 @@ public class MainActivity extends BaseActivity implements ControlButtonMenuListe
             Tools.setFullscreen(this, setFullscreen());
         }
         super.onWindowFocusChanged(hasFocus);
+        CallbackBridge.nativeSetWindowAttrib(LwjglGlfwKeycode.GLFW_FOCUSED, hasFocus ? 1 : 0);
     }
 
     @Override
